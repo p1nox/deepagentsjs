@@ -287,6 +287,188 @@ export function isSandboxBackend(
 }
 
 /**
+ * Metadata for a single sandbox instance.
+ *
+ * This lightweight structure is returned from list operations and provides
+ * basic information about a sandbox without requiring a full connection.
+ *
+ * @typeParam MetadataT - Type of the metadata field. Providers can define
+ *   their own interface for type-safe metadata access.
+ *
+ * @example
+ * ```typescript
+ * // Using default metadata type
+ * const info: SandboxInfo = {
+ *   sandboxId: "sb_abc123",
+ *   metadata: { status: "running", createdAt: "2024-01-15T10:30:00Z" },
+ * };
+ *
+ * // Using typed metadata
+ * interface MyMetadata {
+ *   status: "running" | "stopped";
+ *   createdAt: string;
+ * }
+ * const typedInfo: SandboxInfo<MyMetadata> = {
+ *   sandboxId: "sb_abc123",
+ *   metadata: { status: "running", createdAt: "2024-01-15T10:30:00Z" },
+ * };
+ * ```
+ */
+export interface SandboxInfo<MetadataT = Record<string, unknown>> {
+  /** Unique identifier for the sandbox instance */
+  sandboxId: string;
+  /** Optional provider-specific metadata (e.g., creation time, status, template) */
+  metadata?: MetadataT;
+}
+
+/**
+ * Paginated response from a sandbox list operation.
+ *
+ * This structure supports cursor-based pagination for efficiently browsing
+ * large collections of sandboxes.
+ *
+ * @typeParam MetadataT - Type of the metadata field in SandboxInfo items.
+ *
+ * @example
+ * ```typescript
+ * const response: SandboxListResponse = {
+ *   items: [
+ *     { sandboxId: "sb_001", metadata: { status: "running" } },
+ *     { sandboxId: "sb_002", metadata: { status: "stopped" } },
+ *   ],
+ *   cursor: "eyJvZmZzZXQiOjEwMH0=",
+ * };
+ *
+ * // Fetch next page
+ * const nextResponse = await provider.list({ cursor: response.cursor });
+ * ```
+ */
+export interface SandboxListResponse<MetadataT = Record<string, unknown>> {
+  /** List of sandbox metadata objects for the current page */
+  items: SandboxInfo<MetadataT>[];
+  /**
+   * Opaque continuation token for retrieving the next page.
+   * null indicates no more pages available.
+   */
+  cursor: string | null;
+}
+
+/**
+ * Options for listing sandboxes.
+ */
+export interface SandboxListOptions {
+  /**
+   * Continuation token from a previous list() call.
+   * Pass undefined to start from the beginning.
+   */
+  cursor?: string;
+}
+
+/**
+ * Options for getting or creating a sandbox.
+ */
+export interface SandboxGetOrCreateOptions {
+  /**
+   * Unique identifier of an existing sandbox to retrieve.
+   * If undefined, creates a new sandbox instance.
+   * If provided but the sandbox doesn't exist, an error will be thrown.
+   */
+  sandboxId?: string;
+}
+
+/**
+ * Options for deleting a sandbox.
+ */
+export interface SandboxDeleteOptions {
+  /** Unique identifier of the sandbox to delete */
+  sandboxId: string;
+}
+
+/**
+ * Common error codes shared across all sandbox provider implementations.
+ *
+ * These represent the core error conditions that any sandbox provider may encounter.
+ * Provider-specific error codes should extend this type with additional codes.
+ *
+ * @example
+ * ```typescript
+ * // Provider-specific error code type extending the common codes:
+ * type MySandboxErrorCode = SandboxErrorCode | "CUSTOM_ERROR";
+ * ```
+ */
+export type SandboxErrorCode =
+  /** Sandbox has not been initialized - call initialize() first */
+  | "NOT_INITIALIZED"
+  /** Sandbox is already initialized - cannot initialize twice */
+  | "ALREADY_INITIALIZED"
+  /** Command execution timed out */
+  | "COMMAND_TIMEOUT"
+  /** Command execution failed */
+  | "COMMAND_FAILED"
+  /** File operation (read/write) failed */
+  | "FILE_OPERATION_FAILED";
+
+const SANDBOX_ERROR_SYMBOL = Symbol.for("sandbox.error");
+
+/**
+ * Custom error class for sandbox operations.
+ *
+ * @param message - Human-readable error description
+ * @param code - Structured error code for programmatic handling
+ * @returns SandboxError with message and code
+ *
+ * @example
+ * ```typescript
+ * try {
+ *   await sandbox.execute("some command");
+ * } catch (error) {
+ *   if (error instanceof SandboxError) {
+ *     switch (error.code) {
+ *       case "NOT_INITIALIZED":
+ *         await sandbox.initialize();
+ *         break;
+ *       case "COMMAND_TIMEOUT":
+ *         console.error("Command took too long");
+ *         break;
+ *       default:
+ *         throw error;
+ *     }
+ *   }
+ * }
+ * ```
+ */
+export class SandboxError extends Error {
+  /** Symbol for identifying sandbox error instances */
+  [SANDBOX_ERROR_SYMBOL] = true as const;
+
+  /** Error name for instanceof checks and logging */
+  override readonly name: string = "SandboxError";
+
+  /**
+   * Creates a new SandboxError.
+   *
+   * @param message - Human-readable error description
+   * @param code - Structured error code for programmatic handling
+   */
+  constructor(
+    message: string,
+    public readonly code: string,
+    public readonly cause?: Error,
+  ) {
+    super(message);
+    Object.setPrototypeOf(this, SandboxError.prototype);
+  }
+
+  static isInstance(error: unknown): error is SandboxError {
+    return (
+      typeof error === "object" &&
+      error !== null &&
+      (error as Record<symbol, unknown>)[SANDBOX_ERROR_SYMBOL] === true
+    );
+  }
+}
+
+/**
  * State and store container for backend initialization.
  *
  * This provides a clean interface for what backends need to access:

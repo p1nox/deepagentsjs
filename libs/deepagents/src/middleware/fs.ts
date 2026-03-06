@@ -31,6 +31,7 @@ import { StateBackend } from "../backends/state.js";
 import {
   sanitizeToolCallId,
   formatContentWithLineNumbers,
+  truncateIfTooLong,
 } from "../backends/utils.js";
 
 /**
@@ -71,6 +72,20 @@ export const TOOLS_EXCLUDED_FROM_EVICTION = [
  * This errs on the high side to avoid premature eviction of content that might fit.
  */
 export const NUM_CHARS_PER_TOKEN = 4;
+
+/**
+ * Default values for read_file tool pagination (in lines).
+ */
+export const DEFAULT_READ_LINE_OFFSET = 0;
+export const DEFAULT_READ_LINE_LIMIT = 100;
+
+/**
+ * Template for truncation message in read_file.
+ * {file_path} will be filled in at runtime.
+ */
+const READ_FILE_TRUNCATION_MSG = `
+
+[Output was truncated due to size limits. The file content is very large. Consider reformatting the file to make it easier to navigate. For example, if this is JSON, use execute(command='jq . {file_path}') to pretty-print it with line breaks. For other formats, you can use appropriate formatting tools to split long lines.]`;
 
 /**
  * Message template for evicted tool results.
@@ -131,13 +146,11 @@ import type * as _messages from "@langchain/core/messages";
 /**
  * Zod v3 schema for FileData (re-export from backends)
  */
-const FileDataSchema = z.object({
+export const FileDataSchema = z.object({
   content: z.array(z.string()),
   created_at: z.string(),
   modified_at: z.string(),
 });
-
-export type { FileData };
 
 /**
  * Type for the files state record.
@@ -251,7 +264,7 @@ export const READ_FILE_TOOL_DESCRIPTION = `Reads a file from the filesystem.
 Assume this tool is able to read all files. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
 
 Usage:
-- By default, it reads up to 500 lines starting from the beginning of the file
+- By default, it reads up to 100 lines starting from the beginning of the file
 - **IMPORTANT for large files and codebase exploration**: Use pagination with offset and limit parameters to avoid context overflow
   - First scan: read_file(path, limit=100) to see file structure
   - Read more sections: read_file(path, offset=100, limit=200) for next 200 lines
@@ -290,11 +303,13 @@ Examples:
 export const GREP_TOOL_DESCRIPTION = `Search for a text pattern across files.
 
 Searches for literal text (not regex) and returns matching files or content based on output_mode.
+Special characters like parentheses, brackets, pipes, etc. are treated as literal characters, not regex operators.
 
 Examples:
 - Search all files: \`grep(pattern="TODO")\`
 - Search Python files only: \`grep(pattern="import", glob="*.py")\`
-- Show matching lines: \`grep(pattern="error", output_mode="content")\``;
+- Show matching lines: \`grep(pattern="error", output_mode="content")\`
+- Search for code with special chars: \`grep(pattern="def __init__(self):")\``;
 export const EXECUTE_TOOL_DESCRIPTION = `Executes a shell command in an isolated sandbox environment.
 
 Usage:
@@ -380,7 +395,13 @@ function createLsTool(
           lines.push(`${info.path}${size}`);
         }
       }
-      return lines.join("\n");
+
+      const result = truncateIfTooLong(lines);
+
+      if (Array.isArray(result)) {
+        return result.join("\n");
+      }
+      return result;
     },
     {
       name: "ls",
@@ -401,9 +422,12 @@ function createLsTool(
  */
 function createReadFileTool(
   backend: BackendProtocol | BackendFactory,
-  options: { customDescription: string | undefined },
+  options: {
+    customDescription: string | undefined;
+    toolTokenLimitBeforeEvict: number | null;
+  },
 ) {
-  const { customDescription } = options;
+  const { customDescription, toolTokenLimitBeforeEvict } = options;
   return tool(
     async (input, config) => {
       const stateAndStore: StateAndStore = {
@@ -411,8 +435,36 @@ function createReadFileTool(
         store: (config as any).store,
       };
       const resolvedBackend = getBackend(backend, stateAndStore);
-      const { file_path, offset = 0, limit = 500 } = input;
-      return await resolvedBackend.read(file_path, offset, limit);
+      const {
+        file_path,
+        offset = DEFAULT_READ_LINE_OFFSET,
+        limit = DEFAULT_READ_LINE_LIMIT,
+      } = input;
+      let result = await resolvedBackend.read(file_path, offset, limit);
+
+      // Enforce line limit on result (in case backend returns more)
+      const lines = result.split("\n");
+      if (lines.length > limit) {
+        result = lines.slice(0, limit).join("\n");
+      }
+
+      // Check if result exceeds token threshold and truncate if necessary
+      if (
+        toolTokenLimitBeforeEvict &&
+        result.length >= NUM_CHARS_PER_TOKEN * toolTokenLimitBeforeEvict
+      ) {
+        // Calculate truncation message length to ensure final result stays under threshold
+        const truncationMsg = READ_FILE_TRUNCATION_MSG.replace(
+          "{file_path}",
+          file_path,
+        );
+        const maxContentLength =
+          NUM_CHARS_PER_TOKEN * toolTokenLimitBeforeEvict -
+          truncationMsg.length;
+        result = result.substring(0, maxContentLength) + truncationMsg;
+      }
+
+      return result;
     },
     {
       name: "read_file",
@@ -422,12 +474,12 @@ function createReadFileTool(
         offset: z.coerce
           .number()
           .optional()
-          .default(0)
+          .default(DEFAULT_READ_LINE_OFFSET)
           .describe("Line offset to start reading from (0-indexed)"),
         limit: z.coerce
           .number()
           .optional()
-          .default(500)
+          .default(DEFAULT_READ_LINE_LIMIT)
           .describe("Maximum number of lines to read"),
       }),
     },
@@ -477,7 +529,10 @@ function createWriteFileTool(
       description: customDescription || WRITE_FILE_TOOL_DESCRIPTION,
       schema: z.object({
         file_path: z.string().describe("Absolute path to the file to write"),
-        content: z.string().describe("Content to write to the file"),
+        content: z
+          .string()
+          .default("")
+          .describe("Content to write to the file"),
       }),
     },
   );
@@ -568,7 +623,13 @@ function createGlobTool(
         return `No files found matching pattern '${pattern}'`;
       }
 
-      return infos.map((info) => info.path).join("\n");
+      const paths = infos.map((info) => info.path);
+      const result = truncateIfTooLong(paths);
+
+      if (Array.isArray(result)) {
+        return result.join("\n");
+      }
+      return result;
     },
     {
       name: "glob",
@@ -623,7 +684,12 @@ function createGrepTool(
         lines.push(`  ${match.line}: ${match.text}`);
       }
 
-      return lines.join("\n");
+      const truncated = truncateIfTooLong(lines);
+
+      if (Array.isArray(truncated)) {
+        return truncated.join("\n");
+      }
+      return truncated;
     },
     {
       name: "grep",
@@ -732,6 +798,7 @@ export function createFilesystemMiddleware(
     }),
     createReadFileTool(backend, {
       customDescription: customToolDescriptions?.read_file,
+      toolTokenLimitBeforeEvict,
     }),
     createWriteFileTool(backend, {
       customDescription: customToolDescriptions?.write_file,
@@ -771,18 +838,15 @@ export function createFilesystemMiddleware(
       }
 
       // Build system prompt - add execution instructions if available
-      let systemPrompt = baseSystemPrompt;
+      let filesystemPrompt = baseSystemPrompt;
       if (supportsExecution) {
-        systemPrompt = `${systemPrompt}\n\n${EXECUTION_SYSTEM_PROMPT}`;
+        filesystemPrompt = `${filesystemPrompt}\n\n${EXECUTION_SYSTEM_PROMPT}`;
       }
 
-      // Combine with existing system prompt
-      const currentSystemPrompt = request.systemPrompt || "";
-      const newSystemPrompt = currentSystemPrompt
-        ? `${currentSystemPrompt}\n\n${systemPrompt}`
-        : systemPrompt;
+      // Combine with existing system message
+      const newSystemMessage = request.systemMessage.concat(filesystemPrompt);
 
-      return handler({ ...request, tools, systemPrompt: newSystemPrompt });
+      return handler({ ...request, tools, systemMessage: newSystemMessage });
     },
     wrapToolCall: async (request, handler) => {
       // Return early if eviction is disabled
@@ -845,6 +909,12 @@ export function createFilesystemMiddleware(
             content: replacementText,
             tool_call_id: msg.tool_call_id,
             name: msg.name,
+            id: msg.id,
+            artifact: msg.artifact,
+            status: msg.status,
+            metadata: msg.metadata,
+            additional_kwargs: msg.additional_kwargs,
+            response_metadata: msg.response_metadata,
           });
 
           return {

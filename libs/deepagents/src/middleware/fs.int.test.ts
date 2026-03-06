@@ -63,7 +63,9 @@ describe("Filesystem Middleware Integration Tests", () => {
       );
 
       const lastMessage = response.messages[response.messages.length - 1];
-      expect(lastMessage.content.toString().toLowerCase()).toContain("pokemon");
+      expect(lastMessage.content.toString().toLowerCase()).toMatch(
+        /pok[ée]mon/,
+      );
     },
   );
 
@@ -288,7 +290,7 @@ describe("Filesystem Middleware Integration Tests", () => {
 
       const messages = response.messages;
       const readMessage = messages.find(
-        (msg: any) => msg._getType() === "tool" && msg.name === "read_file",
+        (msg) => ToolMessage.isInstance(msg) && msg.name === "read_file",
       );
 
       expect(readMessage).toBeDefined();
@@ -335,11 +337,60 @@ describe("Filesystem Middleware Integration Tests", () => {
 
       const messages = response.messages;
       const readMessage = messages.find(
-        (msg: any) => msg._getType() === "tool" && msg.name === "read_file",
+        (msg) => ToolMessage.isInstance(msg) && msg.name === "read_file",
       );
 
       expect(readMessage).toBeDefined();
       expect(readMessage!.content.toString()).toContain("Hello from store");
+    },
+  );
+
+  it.concurrent(
+    "should propagate store via invoke config (cloud deployment simulation)",
+    { timeout: 90 * 1000 },
+    async () => {
+      const checkpointer = new MemorySaver();
+      const store = new InMemoryStore();
+
+      await store.put(["filesystem"], "/test.txt", {
+        content: ["Hello from runtime store"],
+        created_at: "2021-01-01",
+        modified_at: "2021-01-01",
+      });
+
+      const agent = createAgent({
+        model: SAMPLE_MODEL,
+        middleware: [
+          createFilesystemMiddleware({
+            backend: (stateAndStore: any) =>
+              new CompositeBackend(new StateBackend(stateAndStore), {
+                "/memories/": new StoreBackend(stateAndStore),
+              }),
+          }),
+        ],
+        checkpointer,
+      });
+
+      const config = {
+        configurable: { thread_id: uuidv4() },
+        store,
+      };
+      const response = await agent.invoke(
+        {
+          messages: [new HumanMessage("Read the file /memories/test.txt")],
+        },
+        config,
+      );
+
+      const messages = response.messages;
+      const readMessage = messages.find(
+        (msg) => ToolMessage.isInstance(msg) && msg.name === "read_file",
+      );
+
+      expect(readMessage).toBeDefined();
+      expect(readMessage!.content.toString()).toContain(
+        "Hello from runtime store",
+      );
     },
   );
 
@@ -428,7 +479,7 @@ describe("Filesystem Middleware Integration Tests", () => {
 
       const messages = response.messages;
       const writeMessage = messages.find(
-        (msg: any) => msg._getType() === "tool" && msg.name === "write_file",
+        (msg) => ToolMessage.isInstance(msg) && msg.name === "write_file",
       );
 
       expect(writeMessage).toBeDefined();
@@ -586,7 +637,7 @@ describe("Filesystem Middleware Integration Tests", () => {
 
       // Command returns files and research state
       expect(response.files).toBeDefined();
-      expect(response.files["/test.txt"]).toBeDefined();
+      expect(response.files!["/test.txt"]).toBeDefined();
     },
   );
 
@@ -611,8 +662,9 @@ describe("Filesystem Middleware Integration Tests", () => {
       });
 
       // Existing files should be preserved
-      expect(response.files["/existing.txt"]).toBeDefined();
-      expect(response.files["/existing.txt"].content).toContain(
+      expect(response.files).toBeDefined();
+      expect(response.files!["/existing.txt"]).toBeDefined();
+      expect(response.files!["/existing.txt"]?.content).toContain(
         "Existing file",
       );
     },
@@ -656,7 +708,7 @@ describe("Filesystem Middleware Integration Tests", () => {
 
       const messages = response.messages;
       const writeMessage = messages.find(
-        (msg: any) => msg._getType() === "tool" && msg.name === "write_file",
+        (msg) => ToolMessage.isInstance(msg) && msg.name === "write_file",
       );
 
       expect(writeMessage).toBeDefined();
@@ -1062,7 +1114,7 @@ describe("Filesystem Middleware Integration Tests", () => {
 
       const messages = response2.messages;
       const readMessage = messages.find(
-        (msg: any) => msg._getType() === "tool" && msg.name === "read_file",
+        (msg) => ToolMessage.isInstance(msg) && msg.name === "read_file",
       );
       expect(readMessage).toBeDefined();
       expect(readMessage!.content.toString()).toContain("Hello World");
@@ -1103,7 +1155,7 @@ describe("Filesystem Middleware Integration Tests", () => {
 
       const readMessages = readResponse.messages;
       const readMessage = readMessages.find(
-        (msg: any) => msg._getType() === "tool" && msg.name === "read_file",
+        (msg) => ToolMessage.isInstance(msg) && msg.name === "read_file",
       );
       expect(readMessage).toBeDefined();
       expect(readMessage!.content.toString()).toContain("Charmander");
@@ -1119,7 +1171,7 @@ describe("Filesystem Middleware Integration Tests", () => {
 
       const listMessages = listResponse.messages;
       const lsMessage = listMessages.find(
-        (msg: any) => msg._getType() === "tool" && msg.name === "ls",
+        (msg) => ToolMessage.isInstance(msg) && msg.name === "ls",
       );
       expect(lsMessage).toBeDefined();
       expect(lsMessage!.content.toString()).toContain("/memories/pokemon.txt");
@@ -1139,7 +1191,7 @@ describe("Filesystem Middleware Integration Tests", () => {
 
       const editMessages = editResponse.messages;
       const editMessage = editMessages.find(
-        (msg: any) => msg._getType() === "tool" && msg.name === "edit_file",
+        (msg) => ToolMessage.isInstance(msg) && msg.name === "edit_file",
       );
       expect(editMessage).toBeDefined();
 
@@ -1196,9 +1248,7 @@ describe("Filesystem Middleware Integration Tests", () => {
       const readMessages = readResponse.messages;
       const readMessage = [...readMessages]
         .reverse()
-        .find(
-          (msg: any) => msg._getType() === "tool" && msg.name === "read_file",
-        );
+        .find((msg) => ToolMessage.isInstance(msg) && msg.name === "read_file");
       expect(readMessage).toBeDefined();
       expect(
         readMessage!.content.toString().toLowerCase().includes("fiery"),
@@ -1216,7 +1266,7 @@ describe("Filesystem Middleware Integration Tests", () => {
 
       const listMessages = listResponse.messages;
       const lsMessage = listMessages.find(
-        (msg: any) => msg._getType() === "tool" && msg.name === "ls",
+        (msg) => ToolMessage.isInstance(msg) && msg.name === "ls",
       );
       expect(lsMessage).toBeDefined();
       expect(lsMessage!.content.toString()).toContain("/charmander.txt");
@@ -1235,8 +1285,8 @@ describe("Filesystem Middleware Integration Tests", () => {
 
       const editedFiles = editResponse.files || {};
       expect(editedFiles["/charmander.txt"]).toBeDefined();
-      const content = editedFiles["/charmander.txt"].content.join("\n");
-      expect(content.toLowerCase().includes("ember")).toBe(true);
+      const content = editedFiles["/charmander.txt"]?.content.join("\n");
+      expect(content?.toLowerCase().includes("ember")).toBe(true);
 
       // Read again to verify edit
       const verifyResponse = await agent.invoke(
@@ -1253,13 +1303,55 @@ describe("Filesystem Middleware Integration Tests", () => {
       const verifyMessages = verifyResponse.messages;
       const verifyReadMessage = [...verifyMessages]
         .reverse()
-        .find(
-          (msg: any) => msg._getType() === "tool" && msg.name === "read_file",
-        );
+        .find((msg) => ToolMessage.isInstance(msg) && msg.name === "read_file");
       expect(verifyReadMessage).toBeDefined();
       expect(
         verifyReadMessage!.content.toString().toLowerCase().includes("ember"),
       ).toBe(true);
+    },
+  );
+
+  it.concurrent(
+    "should propagate store via invoke config with createDeepAgent (cloud deployment simulation)",
+    { timeout: 90 * 1000 },
+    async () => {
+      const checkpointer = new MemorySaver();
+      const store = new InMemoryStore();
+
+      await store.put(["filesystem"], "/test.txt", {
+        content: ["Hello from cloud runtime store"],
+        created_at: "2021-01-01",
+        modified_at: "2021-01-01",
+      });
+
+      const agent = createDeepAgent({
+        backend: (stateAndStore: any) =>
+          new CompositeBackend(new StateBackend(stateAndStore), {
+            "/memories/": new StoreBackend(stateAndStore),
+          }),
+        checkpointer,
+      });
+
+      const config = {
+        configurable: { thread_id: uuidv4() },
+        store,
+      };
+      const response = await agent.invoke(
+        {
+          messages: [new HumanMessage("Read the file /memories/test.txt")],
+        },
+        config,
+      );
+
+      const messages = response.messages;
+      const readMessage = messages.find(
+        (msg: any) => ToolMessage.isInstance(msg) && msg.name === "read_file",
+      );
+
+      expect(readMessage).toBeDefined();
+      expect(readMessage!.content.toString()).toContain(
+        "Hello from cloud runtime store",
+      );
     },
   );
 });

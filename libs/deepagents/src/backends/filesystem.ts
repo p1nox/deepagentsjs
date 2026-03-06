@@ -4,14 +4,13 @@
  * Security and search upgrades:
  * - Secure path resolution with root containment when in virtual_mode (sandboxed to cwd)
  * - Prevent symlink-following on file I/O using O_NOFOLLOW when available
- * - Ripgrep-powered grep with JSON parsing, plus regex fallback
+ * - Ripgrep-powered grep with literal (fixed-string) search, plus substring fallback
  *   and optional glob include filtering, while preserving virtual path behavior
  */
 
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
-import { createInterface as createReadlineInterface } from "node:readline";
 import { spawn } from "node:child_process";
 
 import fg from "fast-glob";
@@ -27,7 +26,7 @@ import type {
   WriteResult,
 } from "./protocol.js";
 import {
-  EMPTY_CONTENT_WARNING,
+  checkEmptyContent,
   formatContentWithLineNumbers,
   performStringReplacement,
 } from "./utils.js";
@@ -42,8 +41,8 @@ const SUPPORTS_NOFOLLOW = fsSync.constants.O_NOFOLLOW !== undefined;
  * as plain text, and metadata (timestamps) are derived from filesystem stats.
  */
 export class FilesystemBackend implements BackendProtocol {
-  private cwd: string;
-  private virtualMode: boolean;
+  protected cwd: string;
+  protected virtualMode: boolean;
   private maxFileSizeBytes: number;
 
   constructor(
@@ -199,19 +198,22 @@ export class FilesystemBackend implements BackendProtocol {
     try {
       const resolvedPath = this.resolvePath(filePath);
 
-      let fileSize: number;
-      let fd: fs.FileHandle | undefined;
+      let content: string;
 
       if (SUPPORTS_NOFOLLOW) {
         const stat = await fs.stat(resolvedPath);
         if (!stat.isFile()) {
           return `Error: File '${filePath}' not found`;
         }
-        fileSize = stat.size;
-        fd = await fs.open(
+        const fd = await fs.open(
           resolvedPath,
           fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW,
         );
+        try {
+          content = await fd.readFile({ encoding: "utf-8" });
+        } finally {
+          await fd.close();
+        }
       } else {
         const stat = await fs.lstat(resolvedPath);
         if (stat.isSymbolicLink()) {
@@ -220,85 +222,24 @@ export class FilesystemBackend implements BackendProtocol {
         if (!stat.isFile()) {
           return `Error: File '${filePath}' not found`;
         }
-        fileSize = stat.size;
-        fd = await fs.open(resolvedPath, fsSync.constants.O_RDONLY);
+        content = await fs.readFile(resolvedPath, "utf-8");
       }
 
-      // Empty file: 0-byte files are always empty
-      if (fileSize === 0) {
-        await fd.close();
-        return EMPTY_CONTENT_WARNING;
+      const emptyMsg = checkEmptyContent(content);
+      if (emptyMsg) {
+        return emptyMsg;
       }
 
-      try {
-        // Check if file ends with newline before streaming
-        const buf = Buffer.alloc(1);
-        const { bytesRead } =
-          fileSize > 0
-            ? await fd.read(buf, 0, 1, fileSize - 1)
-            : { bytesRead: 0 };
-        const endsWithNewline = bytesRead === 1 && buf[0] === 0x0a;
+      const lines = content.split("\n");
+      const startIdx = offset;
+      const endIdx = Math.min(startIdx + limit, lines.length);
 
-        // Stream lines using readline for O(limit) memory instead of O(fileSize)
-        // We create a new read stream from the path (not fd) to avoid fd state issues
-        const stream = fsSync.createReadStream(resolvedPath, {
-          encoding: "utf-8",
-        });
-        const rl = createReadlineInterface({
-          input: stream,
-          crlfDelay: Infinity,
-        });
-
-        const selectedLines: string[] = [];
-        let lineNum = 0;
-        let hasNonWhitespace = false;
-
-        for await (const line of rl) {
-          if (line.trim() !== "") {
-            hasNonWhitespace = true;
-          }
-
-          if (lineNum >= offset && lineNum < offset + limit) {
-            selectedLines.push(line);
-          }
-
-          lineNum++;
-
-          // Early exit: if we've passed the window and already found
-          // non-whitespace, no need to read more
-          if (lineNum >= offset + limit && hasNonWhitespace) {
-            rl.close();
-            stream.destroy();
-            break;
-          }
-        }
-
-        // Account for trailing newline to match split("\n") semantics.
-        // "line1\nline2\n".split("\n") produces ["line1", "line2", ""]
-        // but readline only emits ["line1", "line2"].
-        if (endsWithNewline) {
-          // File ends with \n — add the implicit empty trailing line
-          if (lineNum >= offset && lineNum < offset + limit) {
-            selectedLines.push("");
-          }
-          lineNum++;
-        }
-
-        const totalLineCount = lineNum;
-
-        // Whitespace-only file check
-        if (!hasNonWhitespace) {
-          return EMPTY_CONTENT_WARNING;
-        }
-
-        if (offset >= totalLineCount) {
-          return `Error: Line offset ${offset} exceeds file length (${totalLineCount} lines)`;
-        }
-
-        return formatContentWithLineNumbers(selectedLines, offset + 1);
-      } finally {
-        await fd.close();
+      if (startIdx >= lines.length) {
+        return `Error: Line offset ${offset} exceeds file length (${lines.length} lines)`;
       }
+
+      const selectedLines = lines.slice(startIdx, endIdx);
+      return formatContentWithLineNumbers(selectedLines, startIdx + 1);
     } catch (e: any) {
       return `Error reading file '${filePath}': ${e.message}`;
     }
@@ -469,20 +410,20 @@ export class FilesystemBackend implements BackendProtocol {
   }
 
   /**
-   * Structured search results or error string for invalid input.
+   * Search for a literal text pattern in files.
+   *
+   * Uses ripgrep if available, falling back to substring search.
+   *
+   * @param pattern - Literal string to search for (NOT regex).
+   * @param dirPath - Directory or file path to search in. Defaults to current directory.
+   * @param glob - Optional glob pattern to filter which files to search.
+   * @returns List of GrepMatch dicts containing path, line number, and matched text.
    */
   async grepRaw(
     pattern: string,
     dirPath: string = "/",
     glob: string | null = null,
   ): Promise<GrepMatch[] | string> {
-    // Validate regex
-    try {
-      new RegExp(pattern);
-    } catch (e: any) {
-      return `Invalid regex pattern: ${e.message}`;
-    }
-
     // Resolve base path
     let baseFull: string;
     try {
@@ -497,10 +438,10 @@ export class FilesystemBackend implements BackendProtocol {
       return [];
     }
 
-    // Try ripgrep first, fallback to regex search
+    // Try ripgrep first (with -F flag for literal search), fallback to substring search
     let results = await this.ripgrepSearch(pattern, baseFull, glob);
     if (results === null) {
-      results = await this.pythonSearch(pattern, baseFull, glob);
+      results = await this.literalSearch(pattern, baseFull, glob);
     }
 
     const matches: GrepMatch[] = [];
@@ -513,8 +454,13 @@ export class FilesystemBackend implements BackendProtocol {
   }
 
   /**
-   * Try to use ripgrep for fast searching.
-   * Returns null if ripgrep is not available or fails.
+   * Search using ripgrep with fixed-string (literal) mode.
+   *
+   * @param pattern - Literal string to search for (unescaped).
+   * @param baseFull - Resolved base path to search in.
+   * @param includeGlob - Optional glob pattern to filter files.
+   * @returns Dict mapping file paths to list of (line_number, line_text) tuples.
+   *          Returns null if ripgrep is unavailable or times out.
    */
   private async ripgrepSearch(
     pattern: string,
@@ -522,7 +468,8 @@ export class FilesystemBackend implements BackendProtocol {
     includeGlob: string | null,
   ): Promise<Record<string, Array<[number, string]>> | null> {
     return new Promise((resolve) => {
-      const args = ["--json"];
+      // -F enables fixed-string (literal) mode
+      const args = ["--json", "-F"];
       if (includeGlob) {
         args.push("--glob", includeGlob);
       }
@@ -592,20 +539,20 @@ export class FilesystemBackend implements BackendProtocol {
   }
 
   /**
-   * Fallback regex search implementation using streaming for memory efficiency.
+   * Fallback search using literal substring matching when ripgrep is unavailable.
+   *
+   * Recursively searches files, respecting maxFileSizeBytes limit.
+   *
+   * @param pattern - Literal string to search for.
+   * @param baseFull - Resolved base path to search in.
+   * @param includeGlob - Optional glob pattern to filter files by name.
+   * @returns Dict mapping file paths to list of (line_number, line_text) tuples.
    */
-  private async pythonSearch(
+  private async literalSearch(
     pattern: string,
     baseFull: string,
     includeGlob: string | null,
   ): Promise<Record<string, Array<[number, string]>>> {
-    let regex: RegExp;
-    try {
-      regex = new RegExp(pattern);
-    } catch {
-      return {};
-    }
-
     const results: Record<string, Array<[number, string]>> = {};
     const stat = await fs.stat(baseFull);
     const root = stat.isDirectory() ? baseFull : path.dirname(baseFull);
@@ -629,41 +576,39 @@ export class FilesystemBackend implements BackendProtocol {
         }
 
         // Check file size
-        const fileStat = await fs.stat(fp);
-        if (fileStat.size > this.maxFileSizeBytes) {
+        const stat = await fs.stat(fp);
+        if (stat.size > this.maxFileSizeBytes) {
           continue;
         }
 
-        // Pre-compute virtual path once per file
-        let virtPath: string;
-        if (this.virtualMode) {
-          const relative = path.relative(this.cwd, fp);
-          if (relative.startsWith("..")) continue;
-          const normalizedRelative = relative.split(path.sep).join("/");
-          virtPath = "/" + normalizedRelative;
-        } else {
-          virtPath = fp;
-        }
+        // Read and search using literal substring matching
+        const content = await fs.readFile(fp, "utf-8");
+        const lines = content.split("\n");
 
-        // Stream and search line by line for O(matchingLines) memory
-        const stream = fsSync.createReadStream(fp, { encoding: "utf-8" });
-        const rl = createReadlineInterface({
-          input: stream,
-          crlfDelay: Infinity,
-        });
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          // Simple substring search for literal matching
+          if (line.includes(pattern)) {
+            let virtPath: string;
+            if (this.virtualMode) {
+              try {
+                const relative = path.relative(this.cwd, fp);
+                if (relative.startsWith("..")) continue;
+                const normalizedRelative = relative.split(path.sep).join("/");
+                virtPath = "/" + normalizedRelative;
+              } catch {
+                continue;
+              }
+            } else {
+              virtPath = fp;
+            }
 
-        let lineNum = 0;
-        for await (const line of rl) {
-          lineNum++;
-          if (regex.test(line)) {
             if (!results[virtPath]) {
               results[virtPath] = [];
             }
-            results[virtPath].push([lineNum, line]);
+            results[virtPath].push([i + 1, line]);
           }
         }
-
-        stream.destroy();
       } catch {
         // Skip files we can't read
         continue;

@@ -51,6 +51,7 @@
 import { z } from "zod";
 import {
   createMiddleware,
+  SystemMessage,
   /**
    * required for type inference
    */
@@ -60,6 +61,8 @@ import {
 import type { BackendProtocol, BackendFactory } from "../backends/protocol.js";
 import type { StateBackend } from "../backends/state.js";
 import type { BaseStore } from "@langchain/langgraph-checkpoint";
+import { filesValue } from "../values.js";
+import { StateSchema } from "@langchain/langgraph";
 
 /**
  * Options for the memory middleware.
@@ -85,12 +88,13 @@ export interface MemoryMiddlewareOptions {
 /**
  * State schema for memory middleware.
  */
-const MemoryStateSchema = z.object({
+const MemoryStateSchema = new StateSchema({
   /**
    * Dict mapping source paths to their loaded content.
    * Marked as private so it's not included in the final agent state.
    */
   memoryContents: z.record(z.string(), z.string()).optional(),
+  files: filesValue,
 });
 
 /**
@@ -307,13 +311,14 @@ export function createMemoryMiddleware(options: MemoryMiddlewareOptions) {
         formattedContents,
       );
 
-      // Prepend memory section to system prompt
-      const currentSystemPrompt = request.systemPrompt || "";
-      const newSystemPrompt = currentSystemPrompt
-        ? `${memorySection}\n\n${currentSystemPrompt}`
-        : memorySection;
+      // Concat memory section to system prompt
+      const memoryMessage = new SystemMessage(memorySection);
+      const newSystemMessage = memoryMessage.concat(request.systemMessage);
 
-      return handler({ ...request, systemPrompt: newSystemPrompt });
+      return handler({
+        ...request,
+        systemMessage: newSystemMessage,
+      });
     },
   });
 }

@@ -1,24 +1,38 @@
-# 🧠🤖 Deep Agents
+<div align="center">
+  <a href="https://docs.langchain.com/oss/python/deepagents/overview#deep-agents-overview">
+    <picture>
+      <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/langchain-ai/deepagentsjs/refs/heads/main/.github/images/logo-light.svg">
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/langchain-ai/deepagentsjs/refs/heads/main/.github/images/logo-dark.svg">
+      <img alt="Deep Agents Logo" src="https://raw.githubusercontent.com/langchain-ai/deepagentsjs/refs/heads/main/.github/images/logo-dark.svg" width="50%">
+    </picture>
+  </a>
+</div>
 
-Using an LLM to call tools in a loop is the simplest form of an agent.
-This architecture, however, can yield agents that are "shallow" and fail to plan and act over longer, more complex tasks.
+<div align="center">
+  <h3>The batteries-included agent harness.</h3>
+</div>
+
+<div align="center">
+  <a href="https://www.npmjs.com/package/deepagents"><img src="https://img.shields.io/npm/v/deepagents.svg" alt="npm version"></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.0+-blue.svg" alt="TypeScript"></a>
+  <a href="https://x.com/LangChain_JS" target="_blank"><img src="https://img.shields.io/twitter/url/https/twitter.com/LangChain_JS.svg?style=social&label=Follow%20%40LangChain_JS" alt="Twitter / X"></a>
+</div>
+
+Using an LLM to call tools in a loop is the simplest form of an agent. This architecture, however, can yield agents that are "shallow" and fail to plan and act over longer, more complex tasks.
 
 Applications like "Deep Research", "Manus", and "Claude Code" have gotten around this limitation by implementing a combination of four things:
 a **planning tool**, **sub agents**, access to a **file system**, and a **detailed prompt**.
 
-> 💡 **Tip:** Looking for the Python version of this package? See [langchain-ai/deepagents](https://github.com/langchain-ai/deepagents)
-
-![Deep Agents](https://blog.langchain.com/content/images/2025/07/Screenshot-2025-07-30-at-9.08.32-AM.png)
-
 `deepagents` is a TypeScript package that implements these in a general purpose way so that you can easily create a Deep Agent for your application.
 
-**Acknowledgements: This project was primarily inspired by Claude Code, and initially was largely an attempt to see what made Claude Code general purpose, and make it even more so.**
+> 💡 **Tip:** Looking for the Python version of this package? See [langchain-ai/deepagents](https://github.com/langchain-ai/deepagents)
 
-[![npm version](https://img.shields.io/npm/v/deepagents.svg)](https://www.npmjs.com/package/deepagents)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
+<div align="center">
 
 [Documentation](https://docs.langchain.com/oss/javascript/deepagents/overview) | [Examples](./examples) | [Report Bug](https://github.com/langchain-ai/deepagentsjs/issues) | [Request Feature](https://github.com/langchain-ai/deepagentsjs/issues)
+
+</div>
 
 ## 📖 Overview
 
@@ -117,6 +131,9 @@ const internetSearch = tool(
 const researchInstructions = `You are an expert researcher. Your job is to conduct thorough research, and then write a polished report.
 
 You have access to an internet search tool as your primary means of gathering information.
+
+> [!TIP]
+> For developing, debugging, and deploying AI agents and LLM applications, see [LangSmith](https://docs.langchain.com/langsmith/home).
 
 ## \`internet_search\`
 
@@ -316,6 +333,7 @@ interface SubAgent {
   model?: LanguageModelLike | string;
   middleware?: AgentMiddleware[];
   interruptOn?: Record<string, boolean | InterruptOnConfig>;
+  skills?: string[];
 }
 ```
 
@@ -328,6 +346,37 @@ interface SubAgent {
 - **model**: Optional model name or model instance.
 - **middleware**: Additional middleware to attach to the subagent. See [here](https://docs.langchain.com/oss/typescript/langchain/middleware) for an introduction into middleware and how it works with createAgent.
 - **interruptOn**: A custom interrupt config that specifies human-in-the-loop interactions for your tools.
+- **skills**: Skill source paths for the subagent (e.g., `["/skills/research/"]`). See skills inheritance below.
+
+#### Skills Inheritance
+
+When you configure `skills` on the main agent via `createDeepAgent`, the behavior differs between subagent types:
+
+- **General-purpose subagent**: Automatically inherits skills from the main agent. This subagent has access to all the same skills as the main agent.
+- **Custom subagents**: Do NOT inherit skills from the main agent by default. If you want a custom subagent to have access to skills, you must explicitly define the `skills` property on that subagent.
+
+```typescript
+const agent = createDeepAgent({
+  model: "claude-sonnet-4-20250514",
+  skills: ["/skills/"], // Main agent and general-purpose subagent get these skills
+  subagents: [
+    {
+      name: "researcher",
+      description: "Research assistant",
+      systemPrompt: "You are a researcher.",
+      // This subagent will NOT have access to /skills/ from the main agent
+    },
+    {
+      name: "coder",
+      description: "Coding assistant",
+      systemPrompt: "You are a coder.",
+      skills: ["/skills/coding/"], // This subagent has its own skills
+    },
+  ],
+});
+```
+
+This design ensures context isolation - custom subagents only have access to the skills they explicitly need, preventing unintended skill leakage between specialized agents.
 
 #### Using SubAgent
 
@@ -433,6 +482,7 @@ import {
   StateBackend,
   StoreBackend,
   FilesystemBackend,
+  LocalShellBackend,
   CompositeBackend,
 } from "deepagents";
 import { MemorySaver } from "@langchain/langgraph";
@@ -455,8 +505,16 @@ const agent3 = createDeepAgent({
   backend: (config) => new FilesystemBackend({ rootDir: "./agent-workspace" }),
 });
 
-// CompositeBackend: Combine multiple backends
+// LocalShellBackend: Filesystem access + local shell command execution
 const agent4 = createDeepAgent({
+  backend: new LocalShellBackend({
+    rootDir: "./agent-workspace",
+    inheritEnv: true,
+  }),
+});
+
+// CompositeBackend: Combine multiple backends
+const agent5 = createDeepAgent({
   backend: (config) =>
     new CompositeBackend({
       state: new StateBackend(config),
@@ -658,3 +716,52 @@ const agent = createAgent({
   ],
 });
 ```
+
+## ACP (Agent Client Protocol) Support
+
+Deep Agents can be exposed as an [Agent Client Protocol](https://agentclientprotocol.com) server, enabling integration with IDEs like [Zed](https://zed.dev), JetBrains, and other ACP-compatible clients through a standardized JSON-RPC 2.0 protocol over stdio.
+
+The `deepagents-acp` package wraps your Deep Agent with ACP support:
+
+```bash
+npm install deepagents-acp
+```
+
+The quickest way to get started is via the CLI:
+
+```bash
+npx deepagents-acp --name my-agent --workspace /path/to/project
+```
+
+Or programmatically:
+
+```typescript
+import { startServer } from "deepagents-acp";
+
+await startServer({
+  agents: {
+    name: "coding-assistant",
+    description: "AI coding assistant with filesystem access",
+    skills: ["./skills/"],
+  },
+  workspaceRoot: process.cwd(),
+});
+```
+
+To use with Zed, add the following to your Zed settings:
+
+```json
+{
+  "agent": {
+    "profiles": {
+      "deepagents": {
+        "name": "DeepAgents",
+        "command": "npx",
+        "args": ["deepagents-acp"]
+      }
+    }
+  }
+}
+```
+
+See the [deepagents-acp README](libs/acp/README.md) and the [ACP server example](examples/acp-server/) for full documentation and advanced configuration.

@@ -22,6 +22,9 @@ export type {
   ExtractSubAgentMiddleware,
   FlattenSubAgentMiddleware,
   InferSubAgentMiddlewareStates,
+  // Response format type utilities
+  SupportedResponseFormat,
+  InferStructuredResponse,
 } from "./types.js";
 
 // Export config
@@ -37,6 +40,8 @@ export {
   createFilesystemMiddleware,
   createSubAgentMiddleware,
   createPatchToolCallsMiddleware,
+  createSummarizationMiddleware,
+  computeSummarizationDefaults,
   createMemoryMiddleware,
   // Skills middleware - matches Python's SkillsMiddleware interface
   createSkillsMiddleware,
@@ -46,14 +51,21 @@ export {
   MAX_SKILL_FILE_SIZE,
   MAX_SKILL_NAME_LENGTH,
   MAX_SKILL_DESCRIPTION_LENGTH,
+  // Subagent constants for building custom configurations
+  GENERAL_PURPOSE_SUBAGENT,
+  DEFAULT_GENERAL_PURPOSE_DESCRIPTION,
+  DEFAULT_SUBAGENT_PROMPT,
+  TASK_SYSTEM_PROMPT,
   // Other middleware types
   type FilesystemMiddlewareOptions,
   type SubAgentMiddlewareOptions,
   type MemoryMiddlewareOptions,
   type SubAgent,
   type CompiledSubAgent,
-  type FileData,
 } from "./middleware/index.js";
+
+// Export shared state values (similar to LangGraph's messagesValue pattern)
+export { filesValue } from "./values.js";
 
 // Export agent memory middleware
 export {
@@ -73,10 +85,12 @@ export {
 export {
   StateBackend,
   StoreBackend,
+  type StoreBackendOptions,
   FilesystemBackend,
   CompositeBackend,
   BaseSandbox,
   isSandboxBackend,
+  SandboxError,
   type BackendProtocol,
   type BackendFactory,
   type FileInfo,
@@ -85,9 +99,22 @@ export {
   type EditResult,
   // Sandbox execution types
   type ExecuteResponse,
+  type FileData,
   type FileOperationError,
   type FileDownloadResponse,
   type FileUploadResponse,
   type SandboxBackendProtocol,
+  type StateAndStore,
   type MaybePromise,
+  // Sandbox provider types
+  type SandboxInfo,
+  type SandboxListResponse,
+  type SandboxListOptions,
+  type SandboxGetOrCreateOptions,
+  type SandboxDeleteOptions,
+  // Sandbox error types
+  type SandboxErrorCode,
+  // Local shell backend
+  LocalShellBackend,
+  type LocalShellBackendOptions,
 } from "./backends/index.js";

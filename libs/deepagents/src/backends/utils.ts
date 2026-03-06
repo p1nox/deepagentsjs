@@ -184,6 +184,10 @@ export function formatReadResponse(
  * @param newString - Replacement string
  * @param replaceAll - Whether to replace all occurrences
  * @returns Tuple of [new_content, occurrences] on success, or error message string
+ *
+ * Special case: When both content and oldString are empty, this sets the initial
+ * content to newString. This allows editing empty files by treating empty oldString
+ * as "set initial content" rather than "replace nothing".
  */
 export function performStringReplacement(
   content: string,
@@ -191,6 +195,16 @@ export function performStringReplacement(
   newString: string,
   replaceAll: boolean,
 ): [string, number] | string {
+  // Special case: empty file with empty oldString sets initial content
+  if (content === "" && oldString === "") {
+    return [newString, 0];
+  }
+
+  // Validate that oldString is not empty (for non-empty files)
+  if (oldString === "") {
+    return "Error: oldString cannot be empty when file has content";
+  }
+
   // Use split to count occurrences (simpler than regex)
   const occurrences = content.split(oldString).length - 1;
 
@@ -199,7 +213,7 @@ export function performStringReplacement(
   }
 
   if (occurrences > 1 && !replaceAll) {
-    return `Error: String '${oldString}' appears ${occurrences} times in file. Use replace_all=True to replace all instances, or provide a more specific string with surrounding context.`;
+    return `Error: String '${oldString}' has multiple occurrences (appears ${occurrences} times) in file. Use replace_all=True to replace all instances, or provide a more specific string with surrounding context.`;
   }
 
   // Python's str.replace() replaces ALL occurrences
@@ -448,10 +462,12 @@ export function formatGrepResults(
 }
 
 /**
- * Search file contents for regex pattern.
+ * Search file contents for literal text pattern.
+ *
+ * Performs literal text search.
  *
  * @param files - Dictionary of file paths to FileData
- * @param pattern - Regex pattern to search for
+ * @param pattern - Literal text to search for
  * @param path - Base path to search from
  * @param glob - Optional glob pattern to filter files (e.g., "*.py")
  * @param outputMode - Output format - "files_with_matches", "content", or "count"
@@ -471,13 +487,6 @@ export function grepSearchFiles(
   glob: string | null = null,
   outputMode: "files_with_matches" | "content" | "count" = "files_with_matches",
 ): string {
-  let regex: RegExp;
-  try {
-    regex = new RegExp(pattern);
-  } catch (e: any) {
-    return `Invalid regex pattern: ${e.message}`;
-  }
-
   let normalizedPath: string;
   try {
     normalizedPath = validatePath(path);
@@ -502,7 +511,8 @@ export function grepSearchFiles(
     for (let i = 0; i < fileData.content.length; i++) {
       const line = fileData.content[i];
       const lineNum = i + 1;
-      if (regex.test(line)) {
+      // Simple substring search for literal matching
+      if (line.includes(pattern)) {
         if (!results[filePath]) {
           results[filePath] = [];
         }
@@ -517,14 +527,14 @@ export function grepSearchFiles(
   return formatGrepResults(results, outputMode);
 }
 
-// -------- Structured helpers for composition --------
-
 /**
  * Return structured grep matches from an in-memory files mapping.
  *
- * Returns a list of GrepMatch on success, or a string for invalid inputs
- * (e.g., invalid regex). We deliberately do not raise here to keep backends
- * non-throwing in tool contexts and preserve user-facing error messages.
+ * Performs literal text search (not regex).
+ *
+ * Returns a list of GrepMatch on success, or a string for invalid inputs.
+ * We deliberately do not raise here to keep backends non-throwing in tool
+ * contexts and preserve user-facing error messages.
  */
 export function grepMatchesFromFiles(
   files: Record<string, FileData>,
@@ -532,13 +542,6 @@ export function grepMatchesFromFiles(
   path: string | null = null,
   glob: string | null = null,
 ): GrepMatch[] | string {
-  let regex: RegExp;
-  try {
-    regex = new RegExp(pattern);
-  } catch (e: any) {
-    return `Invalid regex pattern: ${e.message}`;
-  }
-
   let normalizedPath: string;
   try {
     normalizedPath = validatePath(path);
@@ -563,7 +566,8 @@ export function grepMatchesFromFiles(
     for (let i = 0; i < fileData.content.length; i++) {
       const line = fileData.content[i];
       const lineNum = i + 1;
-      if (regex.test(line)) {
+      // Simple substring search for literal matching
+      if (line.includes(pattern)) {
         matches.push({ path: filePath, line: lineNum, text: line });
       }
     }

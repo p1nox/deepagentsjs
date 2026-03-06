@@ -1,7 +1,6 @@
 export {
   createFilesystemMiddleware,
   type FilesystemMiddlewareOptions,
-  type FileData,
   // Eviction constants
   TOOLS_EXCLUDED_FROM_EVICTION,
   NUM_CHARS_PER_TOKEN,
@@ -12,8 +11,16 @@ export {
   type SubAgentMiddlewareOptions,
   type SubAgent,
   type CompiledSubAgent,
+  // Constants for building custom subagent configurations
+  GENERAL_PURPOSE_SUBAGENT,
+  DEFAULT_GENERAL_PURPOSE_DESCRIPTION,
+  DEFAULT_SUBAGENT_PROMPT,
+  TASK_SYSTEM_PROMPT,
 } from "./subagents.js";
-export { createPatchToolCallsMiddleware } from "./patch_tool_calls.js";
+export {
+  createPatchToolCallsMiddleware,
+  patchDanglingToolCalls,
+} from "./patch_tool_calls.js";
 export {
   createMemoryMiddleware,
   type MemoryMiddlewareOptions,
@@ -37,7 +44,9 @@ export { appendToSystemMessage, prependToSystemMessage } from "./utils.js";
 export {
   // Backend-aware summarization middleware with history offloading
   createSummarizationMiddleware,
+  computeSummarizationDefaults,
   type SummarizationMiddlewareOptions,
+  type SummarizationEvent,
   type ContextSize,
   type TruncateArgsSettings,
   // Re-export base summarization middleware from langchain for users who don't need backend offloading
