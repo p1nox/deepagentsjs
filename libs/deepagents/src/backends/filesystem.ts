@@ -11,6 +11,7 @@
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
+import { createInterface as createReadlineInterface } from "node:readline";
 import { spawn } from "node:child_process";
 
 import fg from "fast-glob";
@@ -26,7 +27,7 @@ import type {
   WriteResult,
 } from "./protocol.js";
 import {
-  checkEmptyContent,
+  EMPTY_CONTENT_WARNING,
   formatContentWithLineNumbers,
   performStringReplacement,
 } from "./utils.js";
@@ -198,22 +199,19 @@ export class FilesystemBackend implements BackendProtocol {
     try {
       const resolvedPath = this.resolvePath(filePath);
 
-      let content: string;
+      let fileSize: number;
+      let fd: fs.FileHandle | undefined;
 
       if (SUPPORTS_NOFOLLOW) {
         const stat = await fs.stat(resolvedPath);
         if (!stat.isFile()) {
           return `Error: File '${filePath}' not found`;
         }
-        const fd = await fs.open(
+        fileSize = stat.size;
+        fd = await fs.open(
           resolvedPath,
           fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW,
         );
-        try {
-          content = await fd.readFile({ encoding: "utf-8" });
-        } finally {
-          await fd.close();
-        }
       } else {
         const stat = await fs.lstat(resolvedPath);
         if (stat.isSymbolicLink()) {
@@ -222,24 +220,85 @@ export class FilesystemBackend implements BackendProtocol {
         if (!stat.isFile()) {
           return `Error: File '${filePath}' not found`;
         }
-        content = await fs.readFile(resolvedPath, "utf-8");
+        fileSize = stat.size;
+        fd = await fs.open(resolvedPath, fsSync.constants.O_RDONLY);
       }
 
-      const emptyMsg = checkEmptyContent(content);
-      if (emptyMsg) {
-        return emptyMsg;
+      // Empty file: 0-byte files are always empty
+      if (fileSize === 0) {
+        await fd.close();
+        return EMPTY_CONTENT_WARNING;
       }
 
-      const lines = content.split("\n");
-      const startIdx = offset;
-      const endIdx = Math.min(startIdx + limit, lines.length);
+      try {
+        // Check if file ends with newline before streaming
+        const buf = Buffer.alloc(1);
+        const { bytesRead } =
+          fileSize > 0
+            ? await fd.read(buf, 0, 1, fileSize - 1)
+            : { bytesRead: 0 };
+        const endsWithNewline = bytesRead === 1 && buf[0] === 0x0a;
 
-      if (startIdx >= lines.length) {
-        return `Error: Line offset ${offset} exceeds file length (${lines.length} lines)`;
+        // Stream lines using readline for O(limit) memory instead of O(fileSize)
+        // We create a new read stream from the path (not fd) to avoid fd state issues
+        const stream = fsSync.createReadStream(resolvedPath, {
+          encoding: "utf-8",
+        });
+        const rl = createReadlineInterface({
+          input: stream,
+          crlfDelay: Infinity,
+        });
+
+        const selectedLines: string[] = [];
+        let lineNum = 0;
+        let hasNonWhitespace = false;
+
+        for await (const line of rl) {
+          if (line.trim() !== "") {
+            hasNonWhitespace = true;
+          }
+
+          if (lineNum >= offset && lineNum < offset + limit) {
+            selectedLines.push(line);
+          }
+
+          lineNum++;
+
+          // Early exit: if we've passed the window and already found
+          // non-whitespace, no need to read more
+          if (lineNum >= offset + limit && hasNonWhitespace) {
+            rl.close();
+            stream.destroy();
+            break;
+          }
+        }
+
+        // Account for trailing newline to match split("\n") semantics.
+        // "line1\nline2\n".split("\n") produces ["line1", "line2", ""]
+        // but readline only emits ["line1", "line2"].
+        if (endsWithNewline) {
+          // File ends with \n — add the implicit empty trailing line
+          if (lineNum >= offset && lineNum < offset + limit) {
+            selectedLines.push("");
+          }
+          lineNum++;
+        }
+
+        const totalLineCount = lineNum;
+
+        // Whitespace-only file check
+        if (!hasNonWhitespace) {
+          return EMPTY_CONTENT_WARNING;
+        }
+
+        if (offset >= totalLineCount) {
+          return `Error: Line offset ${offset} exceeds file length (${totalLineCount} lines)`;
+        }
+
+        return formatContentWithLineNumbers(selectedLines, offset + 1);
+      } finally {
+        await fd.close();
       }
-
-      const selectedLines = lines.slice(startIdx, endIdx);
-      return formatContentWithLineNumbers(selectedLines, startIdx + 1);
     } catch (e: any) {
       return `Error reading file '${filePath}': ${e.message}`;
     }
@@ -533,7 +592,7 @@ export class FilesystemBackend implements BackendProtocol {
   }
 
   /**
-   * Fallback regex search implementation.
+   * Fallback regex search implementation using streaming for memory efficiency.
    */
   private async pythonSearch(
     pattern: string,
@@ -570,38 +629,41 @@ export class FilesystemBackend implements BackendProtocol {
         }
 
         // Check file size
-        const stat = await fs.stat(fp);
-        if (stat.size > this.maxFileSizeBytes) {
+        const fileStat = await fs.stat(fp);
+        if (fileStat.size > this.maxFileSizeBytes) {
           continue;
         }
 
-        // Read and search
-        const content = await fs.readFile(fp, "utf-8");
-        const lines = content.split("\n");
+        // Pre-compute virtual path once per file
+        let virtPath: string;
+        if (this.virtualMode) {
+          const relative = path.relative(this.cwd, fp);
+          if (relative.startsWith("..")) continue;
+          const normalizedRelative = relative.split(path.sep).join("/");
+          virtPath = "/" + normalizedRelative;
+        } else {
+          virtPath = fp;
+        }
 
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i];
+        // Stream and search line by line for O(matchingLines) memory
+        const stream = fsSync.createReadStream(fp, { encoding: "utf-8" });
+        const rl = createReadlineInterface({
+          input: stream,
+          crlfDelay: Infinity,
+        });
+
+        let lineNum = 0;
+        for await (const line of rl) {
+          lineNum++;
           if (regex.test(line)) {
-            let virtPath: string;
-            if (this.virtualMode) {
-              try {
-                const relative = path.relative(this.cwd, fp);
-                if (relative.startsWith("..")) continue;
-                const normalizedRelative = relative.split(path.sep).join("/");
-                virtPath = "/" + normalizedRelative;
-              } catch {
-                continue;
-              }
-            } else {
-              virtPath = fp;
-            }
-
             if (!results[virtPath]) {
               results[virtPath] = [];
             }
-            results[virtPath].push([i + 1, line]);
+            results[virtPath].push([lineNum, line]);
           }
         }
+
+        stream.destroy();
       } catch {
         // Skip files we can't read
         continue;

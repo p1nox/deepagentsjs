@@ -365,3 +365,187 @@ describe("FilesystemBackend", () => {
     expect(readResult).toContain("Error");
   });
 });
+
+describe("FilesystemBackend streaming read", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = createTempDir();
+  });
+
+  afterEach(async () => {
+    await removeDir(tmpDir);
+  });
+
+  it("should read with offset and limit", async () => {
+    const filePath = path.join(tmpDir, "lines.txt");
+    const lines = Array.from({ length: 10 }, (_, i) => `line${i + 1}`);
+    await writeFile(filePath, lines.join("\n"));
+
+    const backend = new FilesystemBackend({
+      rootDir: tmpDir,
+      virtualMode: false,
+    });
+
+    // Read lines 3-5 (offset=2, limit=3)
+    const txt = await backend.read(filePath, 2, 3);
+    expect(txt).toContain("line3");
+    expect(txt).toContain("line4");
+    expect(txt).toContain("line5");
+    expect(txt).not.toContain("line2");
+    expect(txt).not.toContain("line6");
+  });
+
+  it("should return error when offset exceeds file length", async () => {
+    const filePath = path.join(tmpDir, "short.txt");
+    await writeFile(filePath, "line1\nline2\nline3");
+
+    const backend = new FilesystemBackend({
+      rootDir: tmpDir,
+      virtualMode: false,
+    });
+
+    const result = await backend.read(filePath, 100);
+    expect(result).toContain("Error");
+    expect(result).toContain("offset");
+    expect(result).toContain("exceeds");
+  });
+
+  it("should handle whitespace-only file", async () => {
+    const filePath = path.join(tmpDir, "whitespace.txt");
+    await writeFile(filePath, "   \n\t  \n  ");
+
+    const backend = new FilesystemBackend({
+      rootDir: tmpDir,
+      virtualMode: false,
+    });
+
+    const txt = await backend.read(filePath);
+    expect(txt).toContain("empty contents");
+  });
+
+  it("should count trailing newline lines correctly", async () => {
+    const filePath = path.join(tmpDir, "trailing.txt");
+    // "line1\nline2\n" split("\n") produces ["line1", "line2", ""] => 3 lines
+    await writeFile(filePath, "line1\nline2\n");
+
+    const backend = new FilesystemBackend({
+      rootDir: tmpDir,
+      virtualMode: false,
+    });
+
+    // offset=2 targets the empty trailing line — should not error
+    const txt2 = await backend.read(filePath, 2, 1);
+    expect(txt2).not.toContain("Error");
+
+    // offset=3 exceeds the 3-line file
+    const txt3 = await backend.read(filePath, 3);
+    expect(txt3).toContain("Error");
+    expect(txt3).toContain("exceeds");
+    expect(txt3).toContain("3 lines");
+  });
+
+  it("should count lines correctly without trailing newline", async () => {
+    const filePath = path.join(tmpDir, "notrail.txt");
+    // "line1\nline2" split("\n") produces ["line1", "line2"] => 2 lines
+    await writeFile(filePath, "line1\nline2");
+
+    const backend = new FilesystemBackend({
+      rootDir: tmpDir,
+      virtualMode: false,
+    });
+
+    const txt = await backend.read(filePath);
+    expect(txt).toContain("line1");
+    expect(txt).toContain("line2");
+
+    // offset=2 exceeds the 2-line file
+    const txt2 = await backend.read(filePath, 2);
+    expect(txt2).toContain("Error");
+    expect(txt2).toContain("exceeds");
+    expect(txt2).toContain("2 lines");
+  });
+
+  it("should handle large file with offset efficiently", async () => {
+    const filePath = path.join(tmpDir, "large.txt");
+    const lines = Array.from({ length: 2000 }, (_, i) => `line${i + 1}`);
+    await writeFile(filePath, lines.join("\n"));
+
+    const backend = new FilesystemBackend({
+      rootDir: tmpDir,
+      virtualMode: false,
+    });
+
+    // Read lines 1001-1010
+    const txt = await backend.read(filePath, 1000, 10);
+    expect(txt).toContain("line1001");
+    expect(txt).toContain("line1010");
+    expect(txt).not.toContain("line1000");
+    expect(txt).not.toContain("line1011");
+  });
+
+  it("should handle single-line file", async () => {
+    const filePath = path.join(tmpDir, "single.txt");
+    await writeFile(filePath, "only line");
+
+    const backend = new FilesystemBackend({
+      rootDir: tmpDir,
+      virtualMode: false,
+    });
+
+    const txt = await backend.read(filePath);
+    expect(txt).toContain("only line");
+  });
+});
+
+describe("FilesystemBackend streaming grep", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = createTempDir();
+  });
+
+  afterEach(async () => {
+    await removeDir(tmpDir);
+  });
+
+  it("should find matches across multiple files", async () => {
+    await writeFile(path.join(tmpDir, "a.txt"), "hello world\nfoo bar");
+    await writeFile(path.join(tmpDir, "b.txt"), "baz qux\nhello again");
+
+    const backend = new FilesystemBackend({
+      rootDir: tmpDir,
+      virtualMode: false,
+    });
+
+    const matches = await backend.grepRaw("hello", tmpDir);
+    expect(Array.isArray(matches)).toBe(true);
+    if (Array.isArray(matches)) {
+      expect(matches.length).toBeGreaterThanOrEqual(2);
+      expect(
+        matches.some((m) => m.path.endsWith("a.txt") && m.line === 1),
+      ).toBe(true);
+      expect(
+        matches.some((m) => m.path.endsWith("b.txt") && m.line === 2),
+      ).toBe(true);
+    }
+  });
+
+  it("should handle unicode in search results", async () => {
+    await writeFile(
+      path.join(tmpDir, "uni.txt"),
+      "Hello 世界\n🚀 emoji\nΩ omega",
+    );
+
+    const backend = new FilesystemBackend({
+      rootDir: tmpDir,
+      virtualMode: false,
+    });
+
+    const matches = await backend.grepRaw("世界", tmpDir);
+    expect(Array.isArray(matches)).toBe(true);
+    if (Array.isArray(matches)) {
+      expect(matches.some((m) => m.text.includes("世界"))).toBe(true);
+    }
+  });
+});
